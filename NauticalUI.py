@@ -16,8 +16,6 @@ import os
 import sys
 import threading
 import random
-import wave
-import struct
 import subprocess
 try:
     import cv2
@@ -100,8 +98,6 @@ _BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 CONFIG_DIR = os.path.join(_BASE_DIR, "nautical_configs")
 CONFIG_PATH = os.path.join(_BASE_DIR, "nautical_config.json")
 PLAYTIME_PATH = os.path.join(CONFIG_DIR, "playtime.json")
-SOUND_DIR = os.path.join(CONFIG_DIR, "sounds")
-SOUND_CHOICES = ["Pop", "Click", "Tick", "Beep", "Blip"]
 STARTUP_REG_NAME = "NauticalUI"
 
 def load_show_console_pref():
@@ -266,6 +262,14 @@ UI_TEXT = "#ffffff"
 UI_MUTED = "#ffffff"
 
 THEMES = {
+    "Default": {
+        "bg": "#000000", "card": "#2a2a2a", "card2": "#363636",
+        "accent": "#a6a6a6", "accent_dim": "#858585",
+        "text": "#ffffff", "muted": "#b0b0b0",
+        "track": "#474747", "border": "#525252",
+        "success": "#3dd68c", "danger": "#ff6b6b",
+        "title": "#ffffff",
+    },
     "Ocean": {
         "bg": "#07090d", "card": "#10151c", "card2": "#181e28",
         "accent": "#3b9eff", "accent_dim": "#2a7acc",
@@ -303,10 +307,39 @@ THEMES = {
     },
 }
 
-def _set_theme_globals(theme_name):
+def _mix_rgb(a, b, amt):
+    a = parse_rgb(a)
+    b = parse_rgb(b)
+    return tuple(int(a[i] * (1.0 - amt) + b[i] * amt) for i in range(3))
+
+def build_custom_theme(bg, fg):
+    bg = parse_rgb(bg, (28, 28, 28))
+    fg = parse_rgb(fg, (255, 26, 26))
+    card2 = _mix_rgb(bg, (255, 255, 255), 0.08)
+    track = _mix_rgb(bg, (255, 255, 255), 0.16)
+    border = _mix_rgb(bg, (255, 255, 255), 0.20)
+    dim = tuple(max(0, min(255, int(c * 0.72))) for c in fg)
+    return {
+        "bg": "#000000",
+        "card": rgb_hex(bg),
+        "card2": rgb_hex(card2),
+        "accent": rgb_hex(fg),
+        "accent_dim": rgb_hex(dim),
+        "text": "#ffffff",
+        "muted": "#ffffff",
+        "track": rgb_hex(track),
+        "border": rgb_hex(border),
+        "success": "#3dd68c",
+        "danger": "#ff6b6b",
+    }
+
+def _set_theme_globals(theme_name, custom=None):
     global C_BG, C_CARD, C_CARD2, C_ACCENT, C_ACCENT_DIM
     global C_TEXT, C_MUTED, C_TRACK, C_BORDER, C_SUCCESS, C_DANGER
-    t = THEMES.get(theme_name) or THEMES["Ocean"]
+    if theme_name == "Custom":
+        t = custom or build_custom_theme((32, 32, 32), (255, 26, 26))
+    else:
+        t = THEMES.get(theme_name) or THEMES["Ocean"]
     C_BG = "#000000"
     C_CARD = t["card"]
     C_CARD2 = t["card2"]
@@ -340,80 +373,6 @@ def mouse_left_down():
 
 def mouse_left_up():
     ctypes.windll.user32.mouse_event(MOUSEEVENTF_LEFTUP, 0, 0, 0, 0)
-
-def _sound_path(name):
-    safe = "".join(ch for ch in str(name or "Pop") if ch.isalnum()).lower() or "pop"
-    return os.path.join(SOUND_DIR, safe + ".wav")
-
-def _write_wav(path, samples, rate=22050):
-    os.makedirs(os.path.dirname(path), exist_ok=True)
-    with wave.open(path, "w") as wf:
-        wf.setnchannels(1)
-        wf.setsampwidth(2)
-        wf.setframerate(rate)
-        wf.writeframes(b"".join(struct.pack("<h", max(-32767, min(32767, int(s)))) for s in samples))
-
-def ensure_builtin_sounds():
-    os.makedirs(SOUND_DIR, exist_ok=True)
-    rate = 22050
-    specs = {
-        "pop": ("pop",),
-        "click": ("click",),
-        "tick": ("tick",),
-        "beep": ("beep",),
-        "blip": ("blip",),
-    }
-    for key in specs:
-        path = os.path.join(SOUND_DIR, key + ".wav")
-        if os.path.isfile(path) and os.path.getsize(path) > 200:
-            continue
-        n = int(rate * (0.07 if key != "beep" else 0.11))
-        samples = []
-        for i in range(n):
-            t = i / float(rate)
-            env = max(0.0, 1.0 - t / (n / float(rate)))
-            if key == "pop":
-                s = env * env * (18000 * math.sin(2 * math.pi * (420 + 900 * env) * t) + 4000 * math.sin(2 * math.pi * 90 * t))
-            elif key == "click":
-                s = env * 22000 * math.sin(2 * math.pi * 1900 * t) if i < int(rate * 0.012) else 0
-            elif key == "tick":
-                s = env * 16000 * math.sin(2 * math.pi * 3100 * t) if i < int(rate * 0.018) else 0
-            elif key == "beep":
-                s = env * 14000 * math.sin(2 * math.pi * 880 * t)
-            else:
-                s = env * 15000 * math.sin(2 * math.pi * (720 + 1400 * t) * t)
-            samples.append(s)
-        _write_wav(path, samples, rate)
-
-def play_ui_sound(name="Pop", volume=100):
-    try:
-        ensure_builtin_sounds()
-        vol = max(0.0, min(1.0, float(volume) / 100.0))
-        if vol <= 0.0:
-            return
-        path = _sound_path("Pop")
-        if sys.platform != "win32":
-            return
-        import winsound
-        if vol >= 0.995:
-            winsound.PlaySound(path, winsound.SND_FILENAME | winsound.SND_ASYNC | winsound.SND_NODEFAULT)
-            return
-        with wave.open(path, "rb") as wf:
-            params = wf.getparams()
-            raw = wf.readframes(wf.getnframes())
-        import array
-        samples = array.array("h")
-        samples.frombytes(raw)
-        for i, s in enumerate(samples):
-            samples[i] = int(s * vol)
-        tmp = os.path.join(SOUND_DIR, "_play.wav")
-        with wave.open(tmp, "w") as out:
-            out.setparams(params)
-            out.writeframes(samples.tobytes())
-        winsound.PlaySound(tmp, winsound.SND_FILENAME | winsound.SND_ASYNC | winsound.SND_NODEFAULT)
-    except Exception:
-        pass
-
 
 def move_cursor_to_position(target_x, target_y, current_x, current_y, factor=1.0, scale=1.0, method="Relative"):
     factor = max(0.0, min(1.0, float(factor)))
@@ -676,12 +635,6 @@ class ColorTrackerGUI:
         self.minimize_to_tray = True
         self.cpu_priority = "Normal"
         self.show_console = bool(load_show_console_pref())
-        self.lock_sound_enabled = False
-        self.trigger_sound_enabled = False
-        self.audio_volume = 100.0
-        self.audio_volume_var = tk.DoubleVar(value=100.0)
-        self.lock_sound_name = "Pop"
-        self.trigger_sound_name = "Pop"
         self.playtime_seconds = 0.0
         self.first_used = ""
         self.last_used = ""
@@ -727,9 +680,23 @@ class ColorTrackerGUI:
         self.trigger_key_mode = "Hold"
         self.trigger_fire_mode = "Click on Color"
         self.menu_opacity = 1.0
-        self.theme = "Crimson"
+        self.theme = "Default"
+        self.custom_bg = (31, 10, 10)
+        self.custom_fg = (255, 26, 26)
         self.circle_color = "white"
         self.lock_color = "red"
+        self.lock_indicator = False
+        self.trigger_indicator = False
+        self.fps_counter = False
+        self._loop_ticks = 0
+        self.lock_ind_idle = (255, 255, 255)
+        self.lock_ind_on = (255, 0, 0)
+        self.trig_ind_idle = (255, 255, 255)
+        self.trig_ind_on = (0, 255, 0)
+        self._ind_lock_on = False
+        self._ind_trig_on = False
+        self.lock_ind_pos = "Top Right"
+        self.trig_ind_pos = "Top Left"
         self.fov_thickness = 1
         self.fov_opacity = 1.0
         self.aim_key_mode = "Toggle"
@@ -829,6 +796,8 @@ class ColorTrackerGUI:
         self.menu_scale = 100.0
         self.menu_scale_var = tk.DoubleVar(value=100.0)
         self.theme_var = tk.StringVar(value=self.theme)
+        self.lock_ind_pos_var = tk.StringVar(value=getattr(self, "lock_ind_pos", "Top Right"))
+        self.trig_ind_pos_var = tk.StringVar(value=getattr(self, "trig_ind_pos", "Top Left"))
         self.aim_point_var = tk.StringVar(value="Center")
         self.edge_bias = 0.0
         self.edge_bias_var = tk.DoubleVar(value=0.0)
@@ -1369,7 +1338,8 @@ class ColorTrackerGUI:
         self.title_bar.pack(fill="x", padx=10, pady=(14, 8))
         self.title_bar.pack_propagate(False)
         self.title_label = tk.Label(
-            self.title_bar, text="NauticalUI V2", bg="#000000", fg=C_ACCENT,
+            self.title_bar, text="NauticalUI V2", bg="#000000",
+            fg=THEMES.get(getattr(self, "theme", ""), {}).get("title", C_ACCENT),
             font=("Segoe UI", 11, "bold"),
         )
         self.title_label.pack(side="left", anchor="w")
@@ -1378,7 +1348,7 @@ class ColorTrackerGUI:
 
         self.tab_buttons = {}
         self.tab_rows = {}
-        for name in ("Aimbot", "Visuals", "Audio", "Keybinds", "Config"):
+        for name in ("Aimbot", "Visuals", "Capture", "Keybinds", "Config"):
             row = tk.Frame(self.sidebar, bg="#000000", cursor="hand2")
             row.pack(fill="x", padx=8, pady=2)
             accent = tk.Frame(row, bg="#000000", width=3)
@@ -1439,7 +1409,7 @@ class ColorTrackerGUI:
         self._sections = []
         self._build_aim_tab()
         self._build_visuals_tab()
-        self._build_audio_tab()
+        self._build_capture_tab()
         self._build_keybinds_tab()
         self._build_config_tab()
 
@@ -2045,9 +2015,6 @@ class ColorTrackerGUI:
         except Exception:
             pass
 
-    def _tab_hover(self, btn, name, entering):
-        self._tab_hover_name(name, entering)
-
     def _tab_hover_name(self, name, entering):
         if not hasattr(self, "tab_rows") or name not in self.tab_rows:
             return
@@ -2237,7 +2204,7 @@ class ColorTrackerGUI:
         )
         self.trigger_fire_mode_menu.pack(fill="x", pady=(2, 0))
         self.trigger_scan_slider, self.trigger_scan_label = self._slider_row(
-            self.trigger_frame, "Scan Area (px)", self.trigger_scan_var, 1, 20,
+            self.trigger_frame, "Scan Area (px)", self.trigger_scan_var, 1, 100,
             self.on_trigger_scan_change, fmt="{:.0f}", snap=1,
         )
         self.trigger_reaction_slider, self.trigger_reaction_label = self._slider_row(
@@ -2331,10 +2298,6 @@ class ColorTrackerGUI:
         self.scan_slider, self.scan_size_label = self._slider_row(
             fov_body, "FOV Size", self.scan_size_var, 50, 500, self.on_scan_size_change
         )
-        self.scan_res_slider, self.scan_res_label = self._slider_row(
-            fov_body, "Scan Resolution", self.scan_res_var, 0.25, 1.0,
-            self.on_scan_res_change, fmt="{:.2f}", snap=0.05,
-        )
         self.fov_thickness_slider, self.fov_thickness_label = self._slider_row(
             fov_body, "FOV Thickness", self.fov_thickness_var, 1, 5,
             self.on_fov_thickness_change, fmt="{:.0f}", snap=1,
@@ -2383,8 +2346,14 @@ class ColorTrackerGUI:
         tk.Label(
             ui_body, text="UI Theme", bg=C_CARD2, fg=UI_MUTED, font=("Segoe UI", 8)
         ).pack(anchor="w")
-        self.theme_menu = self._combo(ui_body, self.theme_var, list(THEMES.keys()), command=self.on_theme_change)
+        self.theme_menu = self._combo(
+            ui_body, self.theme_var, list(THEMES.keys()) + ["Custom"], command=self.on_theme_change
+        )
         self.theme_menu.pack(fill="x", pady=(2, 8))
+        self.custom_theme_frame = tk.Frame(ui_body, bg=C_CARD2)
+        self._standard_color_row(self.custom_theme_frame, "Background", "theme_bg")
+        self._standard_color_row(self.custom_theme_frame, "Foreground", "theme_fg")
+        self._apply_custom_theme_visibility()
         self.menu_scale_slider, self.menu_scale_label = self._slider_row(
             ui_body, "Menu Scale", self.menu_scale_var, 50, 200,
             self.on_menu_scale_change, fmt="{:.0f}", snap=1,
@@ -2409,7 +2378,48 @@ class ColorTrackerGUI:
             get_state=lambda: self.dark_background,
             set_state=lambda v: self._set_dark_background(v),
         )
-        det_body = self._section(left, "DETECTION")
+        self.lock_ind_toggle, self._redraw_lock_ind = self._toggle_row(
+            ui_body, "Lock Indicator",
+            get_state=lambda: self.lock_indicator,
+            set_state=lambda v: self._set_lock_indicator(v),
+        )
+        self.lock_ind_frame = tk.Frame(ui_body, bg=C_CARD2)
+        pos_l = tk.Frame(self.lock_ind_frame, bg=C_CARD2)
+        pos_l.pack(fill="x", pady=(0, 8))
+        tk.Label(pos_l, text="Position", bg=C_CARD2, fg=UI_MUTED, font=("Segoe UI", 8)).pack(anchor="w")
+        self.lock_ind_pos_menu = self._combo(
+            pos_l, self.lock_ind_pos_var,
+            ["Top Right", "Top Left", "Bottom Right", "Bottom Left"],
+            command=self._on_indicator_pos,
+        )
+        self.lock_ind_pos_menu.pack(fill="x", pady=(2, 0))
+        self._standard_color_row(self.lock_ind_frame, "Idle", "lock_ind_idle")
+        self._standard_color_row(self.lock_ind_frame, "On", "lock_ind_on")
+        self.trig_ind_toggle, self._redraw_trig_ind = self._toggle_row(
+            ui_body, "Triggerbot Indicator",
+            get_state=lambda: self.trigger_indicator,
+            set_state=lambda v: self._set_trigger_indicator(v),
+        )
+        self.trig_ind_frame = tk.Frame(ui_body, bg=C_CARD2)
+        pos_t = tk.Frame(self.trig_ind_frame, bg=C_CARD2)
+        pos_t.pack(fill="x", pady=(0, 8))
+        tk.Label(pos_t, text="Position", bg=C_CARD2, fg=UI_MUTED, font=("Segoe UI", 8)).pack(anchor="w")
+        self.trig_ind_pos_menu = self._combo(
+            pos_t, self.trig_ind_pos_var,
+            ["Top Right", "Top Left", "Bottom Right", "Bottom Left"],
+            command=self._on_indicator_pos,
+        )
+        self.trig_ind_pos_menu.pack(fill="x", pady=(2, 0))
+        self._standard_color_row(self.trig_ind_frame, "Idle", "trig_ind_idle")
+        self._standard_color_row(self.trig_ind_frame, "On", "trig_ind_on")
+        self.fps_toggle_row, self._redraw_fps_toggle = self._toggle_row(
+            ui_body, "FPS Counter",
+            get_state=lambda: self.fps_counter,
+            set_state=lambda v: self._set_fps_counter(v),
+        )
+        self._apply_indicator_frames()
+        self._apply_fps_counter()
+        det_body = self._section(right, "DETECTION")
         self._standard_color_row(det_body, "Player Color", "esp")
 
         self.esp_toggle_canvas, self._redraw_esp_toggle = self._toggle_row(
@@ -2474,24 +2484,6 @@ class ColorTrackerGUI:
             set_state=lambda v: self._set_debug_view(v),
         )
 
-        colors_body = self._section(right, "TARGET COLORS")
-        self.tolerance_slider, self.tolerance_label = self._slider_row(
-            colors_body, "Color Tolerance", self.tolerance_var, 0, 100, self.on_tolerance_change
-        )
-        self.color_entries = []
-        self.color_labels = []
-        self.color_row_frames = []
-        self.colors_list_frame = tk.Frame(colors_body, bg=C_CARD2)
-        self.colors_btns_frame = tk.Frame(colors_body, bg=C_CARD2)
-        self.colors_btns_frame.pack(fill="x", pady=(0, 4))
-        self._pill(self.colors_btns_frame, "Add Color", self.add_color_picker)
-        self._pill(self.colors_btns_frame, "Add Color From Screen", self.add_color_from_screen)
-        self._pill(self.colors_btns_frame, "Clear All Colors", self.clear_colors)
-        try:
-            self._rebuild_color_rows()
-        except Exception:
-            pass
-
         xh_body = self._section(right, "CROSSHAIRS")
         self.xhair_toggle_canvas, self._redraw_xhair_toggle = self._toggle_row(
             xh_body, "Crosshair",
@@ -2544,88 +2536,51 @@ class ColorTrackerGUI:
         except Exception:
             pass
 
-
-    def _build_audio_tab(self):
+    def _build_capture_tab(self):
         frame = tk.Frame(self.content, bg=C_CARD)
-        self.tab_frames["Audio"] = frame
+        self.tab_frames["Capture"] = frame
+
         cols = tk.Frame(frame, bg=C_CARD)
         cols.pack(fill="both", expand=True)
-        cols.columnconfigure(0, weight=1, uniform="audiocols")
+        cols.columnconfigure(0, weight=1, uniform="viscols")
         cols.columnconfigure(1, weight=0)
-        cols.columnconfigure(2, weight=1, uniform="audiocols")
+        cols.columnconfigure(2, weight=1, uniform="viscols")
         cols.rowconfigure(0, weight=1)
+
         left_wrap, left = self._make_scroll_col(cols)
         left_wrap.grid(row=0, column=0, sticky="nsew", padx=(0, 6))
         tk.Frame(cols, bg=C_BORDER, width=1).grid(row=0, column=1, sticky="ns", padx=4)
         right_wrap, right = self._make_scroll_col(cols)
         right_wrap.grid(row=0, column=2, sticky="nsew", padx=(6, 0))
-        sounds = self._section(left, "SOUNDS")
-        if not hasattr(self, "audio_volume_var"):
-            self.audio_volume_var = tk.DoubleVar(value=float(getattr(self, "audio_volume", 100)))
-        self.audio_volume_slider, self.audio_volume_label = self._slider_row(
-            sounds, "Volume", self.audio_volume_var, 0, 100,
-            self._on_audio_volume_change, fmt="{:.0f}", snap=1,
+
+        colors_body = self._section(left, "TARGET COLORS")
+        self.tolerance_slider, self.tolerance_label = self._slider_row(
+            colors_body, "Color Tolerance", self.tolerance_var, 0, 100, self.on_tolerance_change
         )
-        self.lock_sound_toggle, self._redraw_lock_sound = self._toggle_row(
-            sounds, "Lock sound",
-            get_state=lambda: self.lock_sound_enabled,
-            set_state=lambda v: self._set_lock_sound(v),
+        self.color_entries = []
+        self.color_labels = []
+        self.color_row_frames = []
+        self.colors_list_frame = tk.Frame(colors_body, bg=C_CARD2)
+        self.colors_btns_frame = tk.Frame(colors_body, bg=C_CARD2)
+        self.colors_btns_frame.pack(fill="x", pady=(0, 4))
+        self._pill(self.colors_btns_frame, "Add Color", self.add_color_picker)
+        self._pill(self.colors_btns_frame, "Add Color From Screen", self.add_color_from_screen)
+        self._pill(self.colors_btns_frame, "Clear All Colors", self.clear_colors)
+        try:
+            self._rebuild_color_rows()
+        except Exception:
+            pass
+
+        scan_body = self._section(right, "SCAN RESOLUTION")
+        self.scan_res_slider, self.scan_res_label = self._slider_row(
+            scan_body, "Scan Resolution", self.scan_res_var, 0.25, 1.0,
+            self.on_scan_res_change, fmt="{:.2f}", snap=0.05,
         )
-        self.trigger_sound_toggle, self._redraw_trigger_sound = self._toggle_row(
-            sounds, "Trigger sound",
-            get_state=lambda: self.trigger_sound_enabled,
-            set_state=lambda v: self._set_trigger_sound(v),
-        )
 
-    def _on_audio_volume_change(self, value):
-        self.audio_volume = max(0.0, min(100.0, float(value)))
-        self._sync_hot_params()
-
-    def _set_lock_sound(self, value):
-        self.lock_sound_enabled = bool(value)
-        self._sync_hot_params()
-        if hasattr(self, "_redraw_lock_sound"):
-            try:
-                self._redraw_lock_sound()
-            except Exception:
-                pass
-
-    def _set_trigger_sound(self, value):
-        self.trigger_sound_enabled = bool(value)
-        self._sync_hot_params()
-        if hasattr(self, "_redraw_trigger_sound"):
-            try:
-                self._redraw_trigger_sound()
-            except Exception:
-                pass
-
-    def _on_sound_choice(self, which, value):
-        name = value if value in SOUND_CHOICES else "Pop"
-        if which == "lock":
-            self.lock_sound_name = name
-            if hasattr(self, "lock_sound_var"):
-                self.lock_sound_var.set(name)
-        else:
-            self.trigger_sound_name = name
-            if hasattr(self, "trigger_sound_var"):
-                self.trigger_sound_var.set(name)
-        self._sync_hot_params()
-        play_ui_sound("Pop", getattr(self, "audio_volume", 100))
-
-    def _apply_audio_frames(self):
-        for wrap, on in (
-            (getattr(self, "lock_sound_menu_wrap", None), getattr(self, "lock_sound_enabled", False)),
-            (getattr(self, "trigger_sound_menu_wrap", None), getattr(self, "trigger_sound_enabled", False)),
-        ):
-            if wrap is None:
-                continue
-            try:
-                if on:
-                    wrap.pack(fill="x", pady=(0, 6))
-                else:
-                    wrap.pack_forget()
-            except Exception:
-                pass
+        rates_body = self._section(right, "RATES")
+        self._slider_row(rates_body, "Aim Hz", self.aim_hz_var, 10, 520, self._on_hz_change, fmt="{:.0f}", snap=1)
+        self._slider_row(rates_body, "Triggerbot Hz", self.trigger_hz_var, 10, 520, self._on_hz_change, fmt="{:.0f}", snap=1)
+        self._slider_row(rates_body, "Overlay Hz", self.overlay_hz_var, 10, 520, self._on_hz_change, fmt="{:.0f}", snap=1)
 
     def _build_keybinds_tab(self):
         frame = tk.Frame(self.content, bg=C_CARD)
@@ -2765,9 +2720,6 @@ class ColorTrackerGUI:
                 lab.configure(text=text)
             except Exception:
                 pass
-
-    def _playtime_file_path(self):
-        return PLAYTIME_PATH
 
     def _load_playtime_file(self):
         for path in (PLAYTIME_PATH, CONFIG_PATH):
@@ -2923,11 +2875,6 @@ class ColorTrackerGUI:
         self.playtime_session_label.pack(fill="x", pady=(0, 4))
         self.playtime_last_label = tk.Label(play_body, text="Last used: —", bg=C_CARD2, fg=UI_TEXT, font=("Segoe UI", 9), anchor="w")
         self.playtime_last_label.pack(fill="x")
-
-        rates_body = self._section(right, "RATES", start_open=False)
-        self._slider_row(rates_body, "Aim Hz", self.aim_hz_var, 10, 520, self._on_hz_change, fmt="{:.0f}", snap=1)
-        self._slider_row(rates_body, "Triggerbot Hz", self.trigger_hz_var, 10, 520, self._on_hz_change, fmt="{:.0f}", snap=1)
-        self._slider_row(rates_body, "Overlay Hz", self.overlay_hz_var, 10, 520, self._on_hz_change, fmt="{:.0f}", snap=1)
 
         self.root.after(100, self.refresh_config_list)
 
@@ -3253,6 +3200,8 @@ class ColorTrackerGUI:
             widgets.append(self._debug_win)
         if getattr(self, "_picker_win", None) is not None:
             widgets.append(self._picker_win)
+        if getattr(self, "_fps_win", None) is not None:
+            widgets.append(self._fps_win)
         for w in widgets:
             self._streamproof_widget(w)
 
@@ -3465,8 +3414,19 @@ class ColorTrackerGUI:
             ),
             "menu_opacity": float(self.menu_opacity),
             "theme": getattr(self, "theme", "Ocean"),
+            "custom_bg": list(parse_rgb(getattr(self, "custom_bg", (31, 10, 10)))),
+            "custom_fg": list(parse_rgb(getattr(self, "custom_fg", (255, 26, 26)))),
             "circle_color": self.circle_color_var.get(),
             "lock_color": self.lock_color_var.get() if hasattr(self, "lock_color_var") else self.lock_color,
+            "lock_indicator": bool(getattr(self, "lock_indicator", False)),
+            "trigger_indicator": bool(getattr(self, "trigger_indicator", False)),
+            "fps_counter": bool(getattr(self, "fps_counter", False)),
+            "lock_ind_idle": list(parse_rgb(getattr(self, "lock_ind_idle", (255, 255, 255)))),
+            "lock_ind_on": list(parse_rgb(getattr(self, "lock_ind_on", (255, 0, 0)))),
+            "trig_ind_idle": list(parse_rgb(getattr(self, "trig_ind_idle", (255, 255, 255)))),
+            "trig_ind_on": list(parse_rgb(getattr(self, "trig_ind_on", (0, 255, 0)))),
+            "lock_ind_pos": getattr(self, "lock_ind_pos_var", None).get() if hasattr(self, "lock_ind_pos_var") else getattr(self, "lock_ind_pos", "Top Right"),
+            "trig_ind_pos": getattr(self, "trig_ind_pos_var", None).get() if hasattr(self, "trig_ind_pos_var") else getattr(self, "trig_ind_pos", "Top Left"),
             "fov_thickness": int(getattr(self, "fov_thickness", 2)),
             "fov_opacity": float(getattr(self, "fov_opacity", 1.0)),
             "target_colors": [list(c) for c in self.target_colors],
@@ -3490,11 +3450,6 @@ class ColorTrackerGUI:
             "minimize_to_tray": bool(getattr(self, "minimize_to_tray", True)),
             "cpu_priority": getattr(self, "cpu_priority_var", None).get() if hasattr(self, "cpu_priority_var") else getattr(self, "cpu_priority", "Normal"),
             "show_console": bool(getattr(self, "show_console", False)),
-            "lock_sound_enabled": bool(getattr(self, "lock_sound_enabled", False)),
-            "trigger_sound_enabled": bool(getattr(self, "trigger_sound_enabled", False)),
-            "audio_volume": float(getattr(self, "audio_volume", 100)),
-            "lock_sound_name": "Pop",
-            "trigger_sound_name": "Pop",
             "streamproof": bool(getattr(self, "streamproof", False)),
             "dark_background": bool(getattr(self, "dark_background", False)),
             "ui_width": int(self.root.winfo_width()),
@@ -3588,7 +3543,7 @@ class ColorTrackerGUI:
         self.recoil_strength = float(data.get("recoil_strength", 2.0))
         if hasattr(self, "recoil_strength_var"):
             self.recoil_strength_var.set(self.recoil_strength)
-        self.trigger_scan_size = max(1, min(20, int(data.get("trigger_scan_size", 4))))
+        self.trigger_scan_size = max(1, min(100, int(data.get("trigger_scan_size", 4))))
         self.trigger_key_name = data.get("trigger_keybind", "XBUTTON2")
         self.trigger_reaction_ms = max(0.0, min(200.0, float(data.get("trigger_reaction_ms", 0))))
         self.trigger_interval_ms = max(0.0, min(500.0, float(data.get("trigger_interval_ms", 50))))
@@ -3606,10 +3561,15 @@ class ColorTrackerGUI:
         if hasattr(self, "trigger_fire_mode_var"):
             self.trigger_fire_mode_var.set(tfm)
         self.menu_opacity = float(data.get("menu_opacity", 1.0))
-        theme = data.get("theme", "Crimson")
-        if theme not in THEMES:
+        theme = data.get("theme", "Default")
+        if theme != "Custom" and theme not in THEMES:
             theme = "Ocean"
         self.theme = theme
+        try:
+            self.custom_bg = parse_rgb(data.get("custom_bg", getattr(self, "custom_bg", (31, 10, 10))))
+            self.custom_fg = parse_rgb(data.get("custom_fg", getattr(self, "custom_fg", (255, 26, 26))))
+        except Exception:
+            pass
         if hasattr(self, "theme_var"):
             self.theme_var.set(theme)
         self.circle_color_var.set(data.get("circle_color", "white"))
@@ -3654,6 +3614,23 @@ class ColorTrackerGUI:
             pass
         self.lock_color_var.set(data.get("lock_color", "red"))
         self.lock_color = self.lock_color_var.get()
+        self.lock_indicator = bool(data.get("lock_indicator", False))
+        self.trigger_indicator = bool(data.get("trigger_indicator", False))
+        self.fps_counter = bool(data.get("fps_counter", False))
+        self.lock_ind_idle = parse_rgb(data.get("lock_ind_idle", (255, 255, 255)))
+        self.lock_ind_on = parse_rgb(data.get("lock_ind_on", (255, 0, 0)))
+        self.trig_ind_idle = parse_rgb(data.get("trig_ind_idle", (255, 255, 255)))
+        self.trig_ind_on = parse_rgb(data.get("trig_ind_on", (0, 255, 0)))
+        self.lock_ind_pos = data.get("lock_ind_pos", "Top Right")
+        self.trig_ind_pos = data.get("trig_ind_pos", "Top Left")
+        if self.lock_ind_pos not in ("Top Right", "Top Left", "Bottom Right", "Bottom Left"):
+            self.lock_ind_pos = "Top Right"
+        if self.trig_ind_pos not in ("Top Right", "Top Left", "Bottom Right", "Bottom Left"):
+            self.trig_ind_pos = "Top Left"
+        if hasattr(self, "lock_ind_pos_var"):
+            self.lock_ind_pos_var.set(self.lock_ind_pos)
+        if hasattr(self, "trig_ind_pos_var"):
+            self.trig_ind_pos_var.set(self.trig_ind_pos)
         self.fov_thickness = max(1, min(5, int(data.get("fov_thickness", 1))))
         self.fov_opacity = max(0.2, min(1.0, float(data.get("fov_opacity", 1.0))))
         self.always_on_top = bool(data.get("always_on_top", True))
@@ -3689,16 +3666,6 @@ class ColorTrackerGUI:
             set_console_visible(self.show_console)
         except Exception:
             pass
-        self.lock_sound_enabled = bool(data.get("lock_sound_enabled", False))
-        self.trigger_sound_enabled = bool(data.get("trigger_sound_enabled", False))
-        try:
-            self.audio_volume = max(0.0, min(100.0, float(data.get("audio_volume", 100))))
-        except Exception:
-            self.audio_volume = 100.0
-        if hasattr(self, "audio_volume_var"):
-            self.audio_volume_var.set(self.audio_volume)
-        self.lock_sound_name = "Pop"
-        self.trigger_sound_name = "Pop"
         try:
             if "playtime_seconds" in data:
                 incoming = float(data.get("playtime_seconds") or 0)
@@ -3982,8 +3949,17 @@ class ColorTrackerGUI:
             "trigger_fire_mode": "Click on Color",
             "menu_opacity": 1.0,
             "menu_scale": 100.0,
-            "theme": "Crimson",
+            "theme": "Default",
             "circle_color": "white",
+            "lock_indicator": False,
+            "trigger_indicator": False,
+            "fps_counter": False,
+            "lock_ind_idle": [255, 255, 255],
+            "lock_ind_on": [255, 0, 0],
+            "trig_ind_idle": [255, 255, 255],
+            "trig_ind_on": [0, 255, 0],
+            "lock_ind_pos": "Top Right",
+            "trig_ind_pos": "Top Left",
             "lock_color": "red",
             "fov_thickness": 1,
             "fov_opacity": 1.0,
@@ -4444,7 +4420,7 @@ class ColorTrackerGUI:
                 pass
 
     def on_trigger_scan_change(self, value):
-        self.trigger_scan_size = max(1, min(20, int(float(value))))
+        self.trigger_scan_size = max(1, min(100, int(float(value))))
         self._sync_hot_params()
 
     def on_trigger_reaction_change(self, value):
@@ -4951,6 +4927,12 @@ class ColorTrackerGUI:
             "bar": "xhair_bar_color",
             "dot": "xhair_dot_color",
             "outline": "xhair_outline_color",
+            "theme_bg": "custom_bg",
+            "theme_fg": "custom_fg",
+            "lock_ind_idle": "lock_ind_idle",
+            "lock_ind_on": "lock_ind_on",
+            "trig_ind_idle": "trig_ind_idle",
+            "trig_ind_on": "trig_ind_on",
         }.get(which, "circle_color")
 
     def _get_pick_rgb(self, which):
@@ -4974,6 +4956,18 @@ class ColorTrackerGUI:
             self.esp_color_var.set(hexv)
             self.esp_color = hexv
             self._sync_hot_params()
+        elif which in ("lock_ind_idle", "lock_ind_on", "trig_ind_idle", "trig_ind_on"):
+            setattr(self, which, rgb)
+            self._paint_indicators()
+        elif which in ("theme_bg", "theme_fg"):
+            setattr(self, "custom_bg" if which == "theme_bg" else "custom_fg", rgb)
+            if getattr(self, "theme", "") == "Custom" or (
+                hasattr(self, "theme_var") and self.theme_var.get() == "Custom"
+            ):
+                try:
+                    self.apply_theme("Custom", rebuild=True)
+                except Exception:
+                    pass
         else:
             self._redraw_xhair()
         self._refresh_pick_row(which)
@@ -5032,17 +5026,12 @@ class ColorTrackerGUI:
         state = {"h": h, "s": s, "v": v, "busy": False}
 
         win = tk.Toplevel(self.root)
+        win.withdraw()
         win.title("Color")
         win.configure(bg="#000000")
         win.attributes("-topmost", True)
         win.resizable(False, False)
         self._picker_win = win
-        try:
-            win.update_idletasks()
-            self._streamproof_widget(win)
-            win.after(40, lambda: self._streamproof_widget(win))
-        except Exception:
-            pass
         wrap = tk.Frame(win, bg="#000000")
         wrap.pack(padx=10, pady=10)
 
@@ -5220,13 +5209,20 @@ class ColorTrackerGUI:
         for var in (r_var, g_var, b_var):
             var.trace_add("write", from_fields)
 
+        confirmed = {"ok": False}
         ok = tk.Label(win, text="OK", bg="#e21b1b", fg="#ffffff", font=("Segoe UI", 10, "bold"), padx=16, pady=6, cursor="hand2")
         ok.pack(pady=(0, 10))
-        ok.bind("<Button-1>", lambda e: win.destroy())
-        win.bind("<Return>", lambda e: win.destroy())
+        def confirm(_e=None):
+            confirmed["ok"] = True
+            win.destroy()
+        ok.bind("<Button-1>", confirm)
+        win.bind("<Return>", confirm)
         live(True)
         sync_entries()
         win.transient(self.root)
+        win.update_idletasks()
+        self._streamproof_widget(win)
+        win.deiconify()
         try:
             win.grab_set()
         except Exception:
@@ -5236,7 +5232,7 @@ class ColorTrackerGUI:
         finally:
             self._color_picker_open = False
             self._picker_win = None
-        return result.get("rgb")
+        return result.get("rgb") if confirmed["ok"] else None
 
     def _refresh_pick_row(self, which):
         rgb = self._get_pick_rgb(which)
@@ -5451,6 +5447,248 @@ class ColorTrackerGUI:
         except Exception:
             pass
 
+    def _set_fps_counter(self, value):
+        self.fps_counter = bool(value)
+        self._apply_fps_counter()
+        if hasattr(self, "_redraw_fps_toggle"):
+            try:
+                self._redraw_fps_toggle()
+            except Exception:
+                pass
+
+    def _apply_fps_counter(self):
+        aid = getattr(self, "_fps_after", None)
+        if aid is not None:
+            try:
+                self.root.after_cancel(aid)
+            except Exception:
+                pass
+            self._fps_after = None
+        win = getattr(self, "_fps_win", None)
+        try:
+            alive = win is not None and win.winfo_exists()
+        except Exception:
+            alive = False
+        if not getattr(self, "fps_counter", False):
+            if alive:
+                try:
+                    win.withdraw()
+                    win.destroy()
+                except Exception:
+                    pass
+            self._fps_win = None
+            self._fps_label = None
+            return
+        if not alive:
+            win = tk.Toplevel(self.root)
+            win.withdraw()
+            win.overrideredirect(True)
+            win.attributes("-topmost", True)
+            win.configure(bg="#000000")
+            lbl = tk.Label(
+                win, text="-- FPS", bg="#000000", fg="#ffffff",
+                font=("Segoe UI", 9, "bold"), padx=8, pady=2,
+            )
+            lbl.pack()
+            self._fps_win = win
+            self._fps_label = lbl
+            win.update_idletasks()
+            try:
+                user32 = ctypes.windll.user32
+                hwnd = user32.GetParent(win.winfo_id()) or win.winfo_id()
+                style = user32.GetWindowLongW(int(hwnd), GWL_EXSTYLE)
+                user32.SetWindowLongW(int(hwnd), GWL_EXSTYLE, style | WS_EX_LAYERED | WS_EX_TRANSPARENT)
+                user32.SetLayeredWindowAttributes(int(hwnd), 0, 255, LWA_ALPHA)
+            except Exception:
+                pass
+            self._streamproof_widget(win)
+            self._place_fps_counter()
+            win.deiconify()
+        self._fps_last_t = time.perf_counter()
+        self._fps_last_n = self._loop_ticks
+        self._fps_after = self.root.after(500, self._tick_fps_counter)
+
+    def _place_fps_counter(self):
+        win = getattr(self, "_fps_win", None)
+        if win is None:
+            return
+        try:
+            win.update_idletasks()
+            w = win.winfo_reqwidth()
+            h = win.winfo_reqheight()
+            x = (win.winfo_screenwidth() - w) // 2
+            win.geometry("%dx%d+%d+%d" % (w, h, x, 8))
+            win.lift()
+        except Exception:
+            pass
+
+    def _tick_fps_counter(self):
+        self._fps_after = None
+        if getattr(self, "_fps_win", None) is None or not getattr(self, "fps_counter", False):
+            return
+        now = time.perf_counter()
+        n = self._loop_ticks
+        dt = now - self._fps_last_t
+        if dt > 0:
+            try:
+                self._fps_label.configure(text="%d FPS" % round((n - self._fps_last_n) / dt))
+            except Exception:
+                pass
+        self._fps_last_t = now
+        self._fps_last_n = n
+        self._place_fps_counter()
+        self._fps_after = self.root.after(500, self._tick_fps_counter)
+
+    def _set_lock_indicator(self, value):
+        self.lock_indicator = bool(value)
+        self._apply_indicator_frames()
+        if hasattr(self, "_redraw_lock_ind"):
+            try:
+                self._redraw_lock_ind()
+            except Exception:
+                pass
+
+    def _set_trigger_indicator(self, value):
+        self.trigger_indicator = bool(value)
+        self._apply_indicator_frames()
+        if hasattr(self, "_redraw_trig_ind"):
+            try:
+                self._redraw_trig_ind()
+            except Exception:
+                pass
+
+    def _on_indicator_pos(self, event=None):
+        if hasattr(self, "lock_ind_pos_var"):
+            self.lock_ind_pos = self.lock_ind_pos_var.get()
+        if hasattr(self, "trig_ind_pos_var"):
+            self.trig_ind_pos = self.trig_ind_pos_var.get()
+        self._place_indicator_overlays()
+
+    def _apply_indicator_frames(self):
+        pairs = (
+            (getattr(self, "lock_indicator", False), getattr(self, "lock_ind_frame", None), getattr(self, "lock_ind_toggle", None)),
+            (getattr(self, "trigger_indicator", False), getattr(self, "trig_ind_frame", None), getattr(self, "trig_ind_toggle", None)),
+        )
+        for enabled, frame, canvas in pairs:
+            if frame is None:
+                continue
+            try:
+                frame.pack_forget()
+            except Exception:
+                pass
+            if not enabled:
+                continue
+            try:
+                anchor = canvas.master if canvas is not None else None
+                if anchor is not None:
+                    frame.pack(fill="x", pady=(0, 6), after=anchor)
+                else:
+                    frame.pack(fill="x", pady=(0, 6))
+            except Exception:
+                try:
+                    frame.pack(fill="x", pady=(0, 6))
+                except Exception:
+                    pass
+        self._ensure_indicator_overlays()
+
+    def _ind_corner_xy(self, pos, size=18, pad=16):
+        try:
+            sw = self.root.winfo_screenwidth()
+            sh = self.root.winfo_screenheight()
+        except Exception:
+            sw, sh = 1920, 1080
+        pos = str(pos or "Top Right")
+        if pos == "Top Left":
+            return pad, pad
+        if pos == "Bottom Left":
+            return pad, sh - size - pad
+        if pos == "Bottom Right":
+            return sw - size - pad, sh - size - pad
+        return sw - size - pad, pad
+
+    def _make_ind_overlay(self, key):
+        win = tk.Toplevel(self.root)
+        win.overrideredirect(True)
+        win.attributes("-topmost", True)
+        chroma = "#ff00ff"
+        try:
+            win.wm_attributes("-transparentcolor", chroma)
+        except Exception:
+            pass
+        win.configure(bg=chroma)
+        cv = tk.Canvas(win, width=18, height=18, bg=chroma, highlightthickness=0, bd=0)
+        cv.pack()
+        dot = cv.create_oval(3, 3, 15, 15, outline="", fill="#ffffff")
+        try:
+            self._streamproof_widget(win)
+        except Exception:
+            pass
+        setattr(self, key + "_win", win)
+        setattr(self, key + "_cv", cv)
+        setattr(self, key + "_dot", dot)
+        return win
+
+    def _ensure_indicator_overlays(self):
+        for enabled, key in (
+            (getattr(self, "lock_indicator", False), "_lock_ind"),
+            (getattr(self, "trigger_indicator", False), "_trig_ind"),
+        ):
+            win = getattr(self, key + "_win", None)
+            if enabled:
+                try:
+                    alive = win is not None and win.winfo_exists()
+                except Exception:
+                    alive = False
+                if not alive:
+                    self._make_ind_overlay(key)
+            else:
+                try:
+                    if win is not None:
+                        win.withdraw()
+                        win.destroy()
+                except Exception:
+                    pass
+                setattr(self, key + "_win", None)
+        self._place_indicator_overlays()
+        self._paint_indicators()
+
+    def _place_indicator_overlays(self):
+        for key, pos_attr, var_attr, default in (
+            ("_lock_ind", "lock_ind_pos", "lock_ind_pos_var", "Top Right"),
+            ("_trig_ind", "trig_ind_pos", "trig_ind_pos_var", "Top Left"),
+        ):
+            win = getattr(self, key + "_win", None)
+            if win is None:
+                continue
+            pos = default
+            if hasattr(self, var_attr):
+                pos = getattr(self, var_attr).get() or pos
+            else:
+                pos = getattr(self, pos_attr, pos)
+            x, y = self._ind_corner_xy(pos)
+            try:
+                win.geometry("18x18+%d+%d" % (int(x), int(y)))
+                win.deiconify()
+                win.lift()
+            except Exception:
+                pass
+
+    def _set_indicator_states(self, lock_on, trig_on):
+        self._ind_lock_on = bool(lock_on)
+        self._ind_trig_on = bool(trig_on)
+        self._paint_indicators()
+
+    def _paint_indicators(self):
+        try:
+            if getattr(self, "_lock_ind_cv", None) is not None:
+                col = rgb_hex(getattr(self, "lock_ind_on" if self._ind_lock_on else "lock_ind_idle", (255, 255, 255)))
+                self._lock_ind_cv.itemconfig(self._lock_ind_dot, fill=col)
+            if getattr(self, "_trig_ind_cv", None) is not None:
+                col = rgb_hex(getattr(self, "trig_ind_on" if self._ind_trig_on else "trig_ind_idle", (255, 255, 255)))
+                self._trig_ind_cv.itemconfig(self._trig_ind_dot, fill=col)
+        except Exception:
+            pass
+
     def _set_fov_color(self, color):
         try:
             shape = getattr(self, "fov_shape", "Circle")
@@ -5491,7 +5729,7 @@ class ColorTrackerGUI:
             pass
         if rebuild:
             try:
-                self.apply_theme(getattr(self, "theme", "Crimson"), rebuild=True)
+                self.apply_theme(getattr(self, "theme", "Default"), rebuild=True)
             except Exception:
                 pass
 
@@ -5502,14 +5740,39 @@ class ColorTrackerGUI:
     def on_theme_change(self, event=None):
         self.apply_theme(self.theme_var.get(), rebuild=True)
 
+    def _apply_custom_theme_visibility(self):
+        frame = getattr(self, "custom_theme_frame", None)
+        if frame is None:
+            return
+        on = (getattr(self, "theme_var", None) and self.theme_var.get() == "Custom") or getattr(self, "theme", "") == "Custom"
+        try:
+            if on:
+                frame.pack(fill="x", pady=(0, 8), before=self.menu_scale_slider.master if hasattr(self, "menu_scale_slider") else None)
+            else:
+                frame.pack_forget()
+        except Exception:
+            try:
+                if on:
+                    frame.pack(fill="x", pady=(0, 8))
+                else:
+                    frame.pack_forget()
+            except Exception:
+                pass
+
     def apply_theme(self, name, rebuild=True):
-        if name not in THEMES:
+        if name != "Custom" and name not in THEMES:
             name = "Ocean"
         self.theme = name
         if hasattr(self, "theme_var"):
             self.theme_var.set(name)
-        _set_theme_globals(name)
-        if getattr(self, "dark_background", False):
+        if name == "Custom":
+            _set_theme_globals("Custom", build_custom_theme(
+                getattr(self, "custom_bg", (31, 10, 10)),
+                getattr(self, "custom_fg", (255, 26, 26)),
+            ))
+        else:
+            _set_theme_globals(name)
+        if getattr(self, "dark_background", False) and name != "Custom":
             global C_CARD, C_CARD2, C_TRACK, C_BORDER
             C_CARD = "#1c1c1c"
             C_CARD2 = "#262626"
@@ -5532,7 +5795,7 @@ class ColorTrackerGUI:
             if hasattr(self, "title_bar"):
                 self.title_bar.configure(bg="#000000")
             if hasattr(self, "title_label"):
-                self.title_label.configure(bg="#000000", fg=C_ACCENT)
+                self.title_label.configure(bg="#000000", fg=THEMES.get(name, {}).get("title", C_ACCENT))
             self._apply_content_background()
             if hasattr(self, "close_btn"):
                 self.close_btn.configure(fg="#ff0000")
@@ -5547,6 +5810,10 @@ class ColorTrackerGUI:
             if hasattr(self, "resize_grip"):
                 self.resize_grip.configure(bg=C_CARD)
                 self._draw_resize_grip()
+            try:
+                self._style_tabs()
+            except Exception:
+                pass
         except Exception:
             pass
 
@@ -5562,7 +5829,7 @@ class ColorTrackerGUI:
             self._sections = []
             self._build_aim_tab()
             self._build_visuals_tab()
-            self._build_audio_tab()
+            self._build_capture_tab()
             self._build_keybinds_tab()
             self._build_config_tab()
             try:
@@ -5719,7 +5986,7 @@ class ColorTrackerGUI:
             self._hot_triggerbot = bool(getattr(self, "triggerbot_enabled", False))
             self._hot_recoil = bool(getattr(self, "recoil_enabled", False))
             self._hot_recoil_strength = float(getattr(self, "recoil_strength", 2.0))
-            self._hot_trigger_scan = max(1, min(20, int(getattr(self, "trigger_scan_size", 4))))
+            self._hot_trigger_scan = max(1, min(100, int(getattr(self, "trigger_scan_size", 4))))
             tk_name = (
                 self.trigger_keybind_var.get()
                 if hasattr(self, "trigger_keybind_var")
@@ -5759,11 +6026,6 @@ class ColorTrackerGUI:
                 if hasattr(self, "tracers_origin_var")
                 else getattr(self, "tracers_origin", "Center")
             )
-            self._hot_lock_sound = bool(getattr(self, "lock_sound_enabled", False))
-            self._hot_trigger_sound = bool(getattr(self, "trigger_sound_enabled", False))
-            self._hot_audio_volume = float(getattr(self, "audio_volume", 100))
-            self._hot_lock_sound_name = "Pop"
-            self._hot_trigger_sound_name = "Pop"
 
     def start(self):
         if self.tracking:
@@ -5822,10 +6084,10 @@ class ColorTrackerGUI:
         last_shake_retarget = 0.0
         last_recoil_t = 0.0
         last_blob_xy = None
-        lock_latched = False
         while self.tracking and not self._worker_stop.is_set():
             t0 = time.perf_counter()
-            if MISSING_PACKAGES:
+            self._loop_ticks += 1
+            if mss is None or cv2 is None or np is None:
                 time.sleep(0.05)
                 continue
             if getattr(self, "_color_picker_open", False):
@@ -5853,11 +6115,6 @@ class ColorTrackerGUI:
                 offset_y = self._hot_offset_y
                 offset_x = self._hot_offset_x
                 triggerbot = self._hot_triggerbot
-                lock_sound_on = bool(getattr(self, "_hot_lock_sound", False))
-                trigger_sound_on = bool(getattr(self, "_hot_trigger_sound", False))
-                lock_sound_name = "Pop"
-                trigger_sound_name = "Pop"
-                audio_volume = float(getattr(self, "_hot_audio_volume", 100))
                 trigger_key = self._hot_trigger_key
                 trigger_scan = int(getattr(self, "_hot_trigger_scan", 4))
                 trigger_key_mode = str(getattr(self, "_hot_trigger_key_mode", "Hold"))
@@ -5967,7 +6224,10 @@ class ColorTrackerGUI:
                     tb_toggle_armed = False
                 tb_prev_key = tb_key_down
             need_fov_scan = need_aim or need_vis or need_debug
-
+            try:
+                self.root.after(0, lambda a=aiming, tb=need_tb: self._set_indicator_states(a, tb))
+            except Exception:
+                pass
             if not need_fov_scan and not need_tb:
                 tb_seen_since = None
                 prev_target = None
@@ -5989,7 +6249,7 @@ class ColorTrackerGUI:
             if need_tb and (now_tb - getattr(self, "_last_tb_scan_t", 0)) >= tb_dt:
                 self._last_tb_scan_t = now_tb
                 try:
-                    ts = max(1, min(20, int(trigger_scan)))
+                    ts = max(1, min(100, int(trigger_scan)))
                     half_ts = ts // 2
                     tb_box = {
                         "left": int(x) - half_ts,
@@ -6016,8 +6276,6 @@ class ColorTrackerGUI:
                                     mouse_left_down()
                                 except Exception:
                                     pass
-                                if trigger_sound_on:
-                                    play_ui_sound("Pop", audio_volume)
                                 tb_color_held = True
                         else:
                             interval_s = max(0.0, float(trigger_interval_ms)) * 0.001
@@ -6031,8 +6289,6 @@ class ColorTrackerGUI:
                                         mouse_left_down()
                                         tb_holding = True
                                         tb_release_at = now_tb + release_s
-                                    if trigger_sound_on:
-                                        play_ui_sound("Pop", audio_volume)
                                 except Exception:
                                     pass
                 else:
@@ -6171,9 +6427,6 @@ class ColorTrackerGUI:
 
             if not aiming:
                 last_blob_xy = None
-                lock_latched = False
-            elif not has_mask:
-                lock_latched = False
             if aiming and has_mask:
                 aim_mask = select_priority_mask(
                     mask, img_d, target_priority, colors, min_area=12, last_xy=last_blob_xy
@@ -6188,16 +6441,6 @@ class ColorTrackerGUI:
                     aim_mask, local_bbox, aim_point=aim_point, edge_bias=edge_bias
                 )
                 if avg is not None:
-                    switched = False
-                    if last_blob_xy is not None:
-                        dx = float(avg[0]) - float(last_blob_xy[0])
-                        dy = float(avg[1]) - float(last_blob_xy[1])
-                        jump = max(28.0, 0.22 * float(min(aim_mask.shape[0], aim_mask.shape[1])))
-                        if dx * dx + dy * dy > jump * jump:
-                            switched = True
-                    if lock_sound_on and (not lock_latched or switched):
-                        play_ui_sound("Pop", audio_volume)
-                    lock_latched = True
                     last_blob_xy = (float(avg[0]), float(avg[1]))
                     avg = (
                         int(bbox["left"] + avg[0] * inv),
@@ -6205,7 +6448,6 @@ class ColorTrackerGUI:
                     )
                 else:
                     last_blob_xy = None
-                    lock_latched = False
                 if avg is not None:
                     now_t = time.perf_counter()
                     aim_x, aim_y = avg[0], avg[1]
@@ -6263,6 +6505,8 @@ class ColorTrackerGUI:
             ctypes.windll.winmm.timeEndPeriod(1)
         except Exception:
             pass
+
+
 
     def make_draggable(self):
         def is_interactive(widget):
