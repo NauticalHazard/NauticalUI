@@ -99,6 +99,8 @@ CONFIG_DIR = os.path.join(_BASE_DIR, "nautical_configs")
 CONFIG_PATH = os.path.join(_BASE_DIR, "nautical_config.json")
 PLAYTIME_PATH = os.path.join(CONFIG_DIR, "playtime.json")
 STARTUP_REG_NAME = "NauticalUI"
+APP_VERSION = "1.0.0"
+UPDATE_URL = "https://raw.githubusercontent.com/NauticalHazard/NauticalUI/main/NauticalUI.py"
 
 def load_show_console_pref():
     try:
@@ -687,8 +689,6 @@ class ColorTrackerGUI:
         self.lock_color = "red"
         self.lock_indicator = False
         self.trigger_indicator = False
-        self.fps_counter = False
-        self._loop_ticks = 0
         self.lock_ind_idle = (255, 255, 255)
         self.lock_ind_on = (255, 0, 0)
         self.trig_ind_idle = (255, 255, 255)
@@ -920,6 +920,88 @@ class ColorTrackerGUI:
 
     def _tray_hide(self):
         self._park_to_tray()
+
+    def _start_update(self):
+        if getattr(self, "_updating", False):
+            return
+        if getattr(sys, "frozen", False):
+            self._set_status("Update only works when running NauticalUI.py", C_DANGER)
+            return
+        self._updating = True
+        self._set_status("Checking for updates...", C_ACCENT)
+        threading.Thread(target=self._update_worker, daemon=True).start()
+
+    def _update_worker(self):
+        import re
+        import ast as _ast
+        import urllib.request
+
+        def post(msg, color):
+            try:
+                self.root.after(0, lambda: self._set_status(msg, color))
+            except Exception:
+                pass
+
+        def vtuple(v):
+            return tuple(int(x) for x in re.findall(r"\d+", str(v)))
+
+        try:
+            req = urllib.request.Request(UPDATE_URL, headers={"User-Agent": "NauticalUI-Updater"})
+            with urllib.request.urlopen(req, timeout=20) as resp:
+                data = resp.read()
+            text = data.decode("utf-8")
+            m = re.search(r'^APP_VERSION\s*=\s*["\']([^"\']+)["\']', text, re.M)
+            if not m:
+                post("Repo copy has no APP_VERSION", C_DANGER)
+                return
+            remote = m.group(1)
+            if vtuple(remote) == vtuple(APP_VERSION):
+                post("Up to date (v%s)" % APP_VERSION, C_SUCCESS)
+                return
+            if vtuple(remote) < vtuple(APP_VERSION):
+                post("Local v%s is newer than repo v%s" % (APP_VERSION, remote), C_MUTED)
+                return
+            _ast.parse(text)
+            if "class ColorTrackerGUI" not in text:
+                post("Update rejected: downloaded file looks wrong", C_DANGER)
+                return
+            script = os.path.abspath(__file__)
+            tmp = script + ".new"
+            with open(tmp, "wb") as f:
+                f.write(data)
+            try:
+                import shutil
+                shutil.copy2(script, script + ".bak")
+            except Exception:
+                pass
+            os.replace(tmp, script)
+            post("Updated to v%s, restarting..." % remote, C_SUCCESS)
+            self.root.after(1200, self._restart_app)
+        except Exception as e:
+            post("Update failed: %s" % (str(e)[:60] or type(e).__name__), C_DANGER)
+        finally:
+            self._updating = False
+
+    def _restart_app(self):
+        code = (
+            "import ctypes,sys,subprocess,os\n"
+            "pid=int(sys.argv[1])\n"
+            "h=ctypes.windll.kernel32.OpenProcess(0x00100000,False,pid)\n"
+            "if h: ctypes.windll.kernel32.WaitForSingleObject(h,15000)\n"
+            "env=os.environ.copy()\n"
+            "env.pop('NAUTICAL_DETACHED',None)\n"
+            "subprocess.Popen([sys.argv[2],sys.argv[3]],env=env,close_fds=True,creationflags=0x08000208)\n"
+        )
+        try:
+            subprocess.Popen(
+                [sys.executable, "-c", code, str(os.getpid()), sys.executable, os.path.abspath(__file__)],
+                close_fds=True, creationflags=0x08000208,
+            )
+        except Exception:
+            self._set_status("Updated. Restart NauticalUI manually", C_ACCENT)
+            return
+        self._quit_app()
+        os._exit(0)
 
     def _quit_app(self):
         try:
@@ -2412,13 +2494,7 @@ class ColorTrackerGUI:
         self.trig_ind_pos_menu.pack(fill="x", pady=(2, 0))
         self._standard_color_row(self.trig_ind_frame, "Idle", "trig_ind_idle")
         self._standard_color_row(self.trig_ind_frame, "On", "trig_ind_on")
-        self.fps_toggle_row, self._redraw_fps_toggle = self._toggle_row(
-            ui_body, "FPS Counter",
-            get_state=lambda: self.fps_counter,
-            set_state=lambda v: self._set_fps_counter(v),
-        )
         self._apply_indicator_frames()
-        self._apply_fps_counter()
         det_body = self._section(right, "DETECTION")
         self._standard_color_row(det_body, "Player Color", "esp")
 
@@ -2867,6 +2943,7 @@ class ColorTrackerGUI:
         actions_body = self._section(right, "ACTIONS")
         self._pill(actions_body, "Save Current", self.save_config_as, accent=True)
         self._pill(actions_body, "Reset to Defaults", self.reset_defaults, accent=False)
+        self._pill(actions_body, "Update NauticalUI", self._start_update, accent=False)
 
         play_body = self._section(right, "PLAYTIME")
         self.playtime_total_label = tk.Label(play_body, text="Total: 0m", bg=C_CARD2, fg=UI_TEXT, font=("Segoe UI", 9), anchor="w")
@@ -3200,8 +3277,6 @@ class ColorTrackerGUI:
             widgets.append(self._debug_win)
         if getattr(self, "_picker_win", None) is not None:
             widgets.append(self._picker_win)
-        if getattr(self, "_fps_win", None) is not None:
-            widgets.append(self._fps_win)
         for w in widgets:
             self._streamproof_widget(w)
 
@@ -3420,7 +3495,6 @@ class ColorTrackerGUI:
             "lock_color": self.lock_color_var.get() if hasattr(self, "lock_color_var") else self.lock_color,
             "lock_indicator": bool(getattr(self, "lock_indicator", False)),
             "trigger_indicator": bool(getattr(self, "trigger_indicator", False)),
-            "fps_counter": bool(getattr(self, "fps_counter", False)),
             "lock_ind_idle": list(parse_rgb(getattr(self, "lock_ind_idle", (255, 255, 255)))),
             "lock_ind_on": list(parse_rgb(getattr(self, "lock_ind_on", (255, 0, 0)))),
             "trig_ind_idle": list(parse_rgb(getattr(self, "trig_ind_idle", (255, 255, 255)))),
@@ -3616,7 +3690,6 @@ class ColorTrackerGUI:
         self.lock_color = self.lock_color_var.get()
         self.lock_indicator = bool(data.get("lock_indicator", False))
         self.trigger_indicator = bool(data.get("trigger_indicator", False))
-        self.fps_counter = bool(data.get("fps_counter", False))
         self.lock_ind_idle = parse_rgb(data.get("lock_ind_idle", (255, 255, 255)))
         self.lock_ind_on = parse_rgb(data.get("lock_ind_on", (255, 0, 0)))
         self.trig_ind_idle = parse_rgb(data.get("trig_ind_idle", (255, 255, 255)))
@@ -3953,7 +4026,6 @@ class ColorTrackerGUI:
             "circle_color": "white",
             "lock_indicator": False,
             "trigger_indicator": False,
-            "fps_counter": False,
             "lock_ind_idle": [255, 255, 255],
             "lock_ind_on": [255, 0, 0],
             "trig_ind_idle": [255, 255, 255],
@@ -5447,98 +5519,6 @@ class ColorTrackerGUI:
         except Exception:
             pass
 
-    def _set_fps_counter(self, value):
-        self.fps_counter = bool(value)
-        self._apply_fps_counter()
-        if hasattr(self, "_redraw_fps_toggle"):
-            try:
-                self._redraw_fps_toggle()
-            except Exception:
-                pass
-
-    def _apply_fps_counter(self):
-        aid = getattr(self, "_fps_after", None)
-        if aid is not None:
-            try:
-                self.root.after_cancel(aid)
-            except Exception:
-                pass
-            self._fps_after = None
-        win = getattr(self, "_fps_win", None)
-        try:
-            alive = win is not None and win.winfo_exists()
-        except Exception:
-            alive = False
-        if not getattr(self, "fps_counter", False):
-            if alive:
-                try:
-                    win.withdraw()
-                    win.destroy()
-                except Exception:
-                    pass
-            self._fps_win = None
-            self._fps_label = None
-            return
-        if not alive:
-            win = tk.Toplevel(self.root)
-            win.withdraw()
-            win.overrideredirect(True)
-            win.attributes("-topmost", True)
-            win.configure(bg="#000000")
-            lbl = tk.Label(
-                win, text="-- FPS", bg="#000000", fg="#ffffff",
-                font=("Segoe UI", 9, "bold"), padx=8, pady=2,
-            )
-            lbl.pack()
-            self._fps_win = win
-            self._fps_label = lbl
-            win.update_idletasks()
-            try:
-                user32 = ctypes.windll.user32
-                hwnd = user32.GetParent(win.winfo_id()) or win.winfo_id()
-                style = user32.GetWindowLongW(int(hwnd), GWL_EXSTYLE)
-                user32.SetWindowLongW(int(hwnd), GWL_EXSTYLE, style | WS_EX_LAYERED | WS_EX_TRANSPARENT)
-                user32.SetLayeredWindowAttributes(int(hwnd), 0, 255, LWA_ALPHA)
-            except Exception:
-                pass
-            self._streamproof_widget(win)
-            self._place_fps_counter()
-            win.deiconify()
-        self._fps_last_t = time.perf_counter()
-        self._fps_last_n = self._loop_ticks
-        self._fps_after = self.root.after(500, self._tick_fps_counter)
-
-    def _place_fps_counter(self):
-        win = getattr(self, "_fps_win", None)
-        if win is None:
-            return
-        try:
-            win.update_idletasks()
-            w = win.winfo_reqwidth()
-            h = win.winfo_reqheight()
-            x = (win.winfo_screenwidth() - w) // 2
-            win.geometry("%dx%d+%d+%d" % (w, h, x, 8))
-            win.lift()
-        except Exception:
-            pass
-
-    def _tick_fps_counter(self):
-        self._fps_after = None
-        if getattr(self, "_fps_win", None) is None or not getattr(self, "fps_counter", False):
-            return
-        now = time.perf_counter()
-        n = self._loop_ticks
-        dt = now - self._fps_last_t
-        if dt > 0:
-            try:
-                self._fps_label.configure(text="%d FPS" % round((n - self._fps_last_n) / dt))
-            except Exception:
-                pass
-        self._fps_last_t = now
-        self._fps_last_n = n
-        self._place_fps_counter()
-        self._fps_after = self.root.after(500, self._tick_fps_counter)
-
     def _set_lock_indicator(self, value):
         self.lock_indicator = bool(value)
         self._apply_indicator_frames()
@@ -6086,7 +6066,6 @@ class ColorTrackerGUI:
         last_blob_xy = None
         while self.tracking and not self._worker_stop.is_set():
             t0 = time.perf_counter()
-            self._loop_ticks += 1
             if mss is None or cv2 is None or np is None:
                 time.sleep(0.05)
                 continue
