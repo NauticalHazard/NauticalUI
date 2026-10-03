@@ -99,24 +99,6 @@ CONFIG_DIR = os.path.join(_BASE_DIR, "nautical_configs")
 CONFIG_PATH = os.path.join(_BASE_DIR, "nautical_config.json")
 PLAYTIME_PATH = os.path.join(CONFIG_DIR, "playtime.json")
 STARTUP_REG_NAME = "NauticalUI"
-APP_VERSION = "1.0.0"
-UPDATE_URL = "https://raw.githubusercontent.com/NauticalHazard/NauticalUI/main/NauticalUI.py"
-
-
-def _version_tuple(v):
-    import re
-    return tuple(int(x) for x in re.findall(r"\d+", str(v)))
-
-
-def _fetch_remote_update():
-    import re
-    import urllib.request
-    req = urllib.request.Request(UPDATE_URL, headers={"User-Agent": "NauticalUI-Updater"})
-    with urllib.request.urlopen(req, timeout=20) as resp:
-        data = resp.read()
-    text = data.decode("utf-8")
-    m = re.search(r'^APP_VERSION\s*=\s*["\']([^"\']+)["\']', text, re.M)
-    return data, text, (m.group(1) if m else None)
 
 def load_show_console_pref():
     try:
@@ -937,109 +919,6 @@ class ColorTrackerGUI:
     def _tray_hide(self):
         self._park_to_tray()
 
-    def _start_update(self):
-        if getattr(self, "_updating", False):
-            return
-        if getattr(sys, "frozen", False):
-            self._set_status("Update only works when running NauticalUI.py", C_DANGER)
-            return
-        self._updating = True
-        self._set_status("Checking for updates...", C_ACCENT)
-        threading.Thread(target=self._update_worker, daemon=True).start()
-
-    def _update_worker(self):
-        import ast as _ast
-
-        def post(msg, color):
-            try:
-                self.root.after(0, lambda: self._set_status(msg, color))
-            except Exception:
-                pass
-
-        try:
-            data, text, remote = _fetch_remote_update()
-            if not remote:
-                post("Repo copy has no APP_VERSION", C_DANGER)
-                return
-            if _version_tuple(remote) == _version_tuple(APP_VERSION):
-                post("Up to date (v%s)" % APP_VERSION, C_SUCCESS)
-                return
-            if _version_tuple(remote) < _version_tuple(APP_VERSION):
-                post("Local v%s is newer than repo v%s" % (APP_VERSION, remote), C_MUTED)
-                return
-            _ast.parse(text)
-            if "class ColorTrackerGUI" not in text:
-                post("Update rejected: downloaded file looks wrong", C_DANGER)
-                return
-            script = os.path.abspath(__file__)
-            tmp = script + ".new"
-            with open(tmp, "wb") as f:
-                f.write(data)
-            try:
-                import shutil
-                shutil.copy2(script, script + ".bak")
-            except Exception:
-                pass
-            os.replace(tmp, script)
-            post("Updated to v%s, restarting..." % remote, C_SUCCESS)
-            self.root.after(1200, self._restart_app)
-        except Exception as e:
-            post("Update failed: %s" % (str(e)[:60] or type(e).__name__), C_DANGER)
-        finally:
-            self._updating = False
-
-    def _check_update_banner(self):
-        if getattr(sys, "frozen", False):
-            return
-
-        def work():
-            try:
-                _data, _text, remote = _fetch_remote_update()
-                if remote and _version_tuple(remote) > _version_tuple(APP_VERSION):
-                    self.root.after(0, lambda: self._show_update_banner(remote))
-            except Exception:
-                pass
-
-        threading.Thread(target=work, daemon=True).start()
-
-    def _show_update_banner(self, version):
-        if getattr(self, "_update_bar", None) is not None:
-            return
-        bar = tk.Frame(self.card, bg="#3a1010", highlightthickness=1, highlightbackground="#ff4444", cursor="hand2")
-        bar.pack(fill="x", padx=10, pady=(4, 4), before=self.scroll_canvas.master)
-        lbl = tk.Label(
-            bar,
-            text="Update available (v%s) - click here to update" % version,
-            bg="#3a1010", fg="#ff8080",
-            font=("Segoe UI", 9, "bold"),
-            wraplength=560, justify="left", cursor="hand2",
-        )
-        lbl.pack(anchor="w", padx=10, pady=8)
-        for w in (bar, lbl):
-            w.bind("<Button-1>", lambda e: self._start_update())
-        self._update_bar = bar
-
-    def _restart_app(self):
-        code = (
-            "import ctypes,sys,subprocess,os\n"
-            "pid=int(sys.argv[1])\n"
-            "h=ctypes.windll.kernel32.OpenProcess(0x00100000,False,pid)\n"
-            "if h: ctypes.windll.kernel32.WaitForSingleObject(h,15000)\n"
-            "env=os.environ.copy()\n"
-            "env.pop('NAUTICAL_DETACHED',None)\n"
-            "subprocess.Popen([sys.argv[2],sys.argv[3]],env=env,close_fds=True,creationflags=0x08000208)\n"
-        )
-        try:
-            subprocess.Popen(
-                [sys.executable, "-c", code, str(os.getpid()), sys.executable, os.path.abspath(__file__)],
-                close_fds=True, creationflags=0x08000208,
-            )
-        except Exception:
-            self._set_status("Updated. Restart NauticalUI manually", C_ACCENT)
-            return
-        self._quit_app()
-        os._exit(0)
-
     def _quit_app(self):
         try:
             self._playtime_closing = True
@@ -1503,7 +1382,6 @@ class ColorTrackerGUI:
             self._show_missing_banner()
         except Exception:
             pass
-        self.root.after(2500, self._check_update_banner)
         scroll_wrap = tk.Frame(self.card, bg=C_CARD, highlightthickness=0, bd=0)
         scroll_wrap.pack(fill="both", expand=True, padx=12, pady=0)
 
@@ -2981,7 +2859,6 @@ class ColorTrackerGUI:
         actions_body = self._section(right, "ACTIONS")
         self._pill(actions_body, "Save Current", self.save_config_as, accent=True)
         self._pill(actions_body, "Reset to Defaults", self.reset_defaults, accent=False)
-        self._pill(actions_body, "Update NauticalUI", self._start_update, accent=False)
 
         play_body = self._section(right, "PLAYTIME")
         self.playtime_total_label = tk.Label(play_body, text="Total: 0m", bg=C_CARD2, fg=UI_TEXT, font=("Segoe UI", 9), anchor="w")
